@@ -49,7 +49,6 @@ from tqdm import tqdm
 # Local imports
 import voxelmorph as vxm
 
-# todo: add validation loop
 # todo: add MLFlow logging
 
 
@@ -58,14 +57,19 @@ class VxmIterableDataset(IterableDataset):
     PyTorch IterableDataset for infinite VoxelMorph registration data.
     """
 
-    def __init__(self, device: str = "cpu") -> None:
+    def __init__(
+        self, device: str = "cpu", indices: Sequence[int] | None = None
+    ) -> None:
         """
         Parameters
         ----------
         device : str
             Device to place tensors on.
+        indices : Sequence[int] | None
+            Subject indices to include (e.g., [1, 2, 3]). If None, use default range.
         """
         self.device = device
+        self.indices = indices
         self.oasis_path = Path("/home/iml/fryderyk.koegl/data/neurite-oasis")
         self._get_vol_paths()
 
@@ -100,7 +104,8 @@ class VxmIterableDataset(IterableDataset):
         """
         self.folder_abspaths = []
 
-        for i in range(1, 4):
+        indices = self.indices if self.indices is not None else range(1, 4)
+        for i in indices:
             folder = self.oasis_path / f"OASIS_OAS1_{i:04}_MR1"
 
             if folder.exists():
@@ -164,6 +169,39 @@ def train_epoch(
     return total_loss / steps_per_epoch
 
 
+@torch.no_grad()
+def validate_epoch(
+    model: nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    image_loss_fn: nn.Module,
+    grad_loss_fn: nn.Module,
+    loss_weights: Sequence[float],
+    steps_per_epoch: int,
+    device: str = "cuda",
+) -> float:
+    """
+    Validate for one epoch.
+    """
+    model.eval()
+    total_loss = 0.0
+
+    for _ in range(steps_per_epoch):
+        batch = next(dataloader)
+        source = batch["source"].to(device)
+        target = batch["target"].to(device)
+
+        displacement, warped_source = model(
+            source, target, return_warped_source=True, return_field_type="displacement"
+        )
+
+        img_loss = image_loss_fn(target, warped_source)
+        grad_loss = grad_loss_fn(displacement)
+        loss = loss_weights[0] * img_loss + loss_weights[1] * grad_loss
+        total_loss += loss.item()
+
+    return total_loss / steps_per_epoch
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train 3D VoxelMorph on OASIS data")
     parser.add_argument(
@@ -177,6 +215,7 @@ def main():
     parser.add_argument(
         "--steps-per-epoch", type=int, default=2, help="Steps per epoch"
     )
+    parser.add_argument("--val-steps", type=int, default=2, help="Validation steps")
     parser.add_argument("--batch-size", type=int, default=1, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--lambda", type=float, dest="lambda_param", default=0.01)
@@ -206,10 +245,20 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # Create dataloader
-    train_dataset = VxmIterableDataset(device=device)
+    train_indices = [0, 1, 2]
+    val_indices = [3]
+    train_dataset = VxmIterableDataset(device=device, indices=train_indices)
     train_loader = iter(
         DataLoader(
             train_dataset,
+            batch_size=args.batch_size,
+            num_workers=args.workers,
+        )
+    )
+    val_dataset = VxmIterableDataset(device=device, indices=val_indices)
+    val_loader = iter(
+        DataLoader(
+            val_dataset,
             batch_size=args.batch_size,
             num_workers=args.workers,
         )
@@ -224,7 +273,7 @@ def main():
     best_loss = float("inf")
     for epoch in tqdm(range(args.epochs), desc="Epochs"):
         # Train for one epoch
-        avg_loss = train_epoch(
+        train_loss = train_epoch(
             model=model,
             dataloader=train_loader,
             optimizer=optimizer,
@@ -234,10 +283,22 @@ def main():
             steps_per_epoch=args.steps_per_epoch,
             device=device,
         )
+        val_loss = validate_epoch(
+            model=model,
+            dataloader=val_loader,
+            image_loss_fn=image_loss_fn,
+            grad_loss_fn=grad_loss_fn,
+            loss_weights=loss_weights,
+            steps_per_epoch=args.val_steps,
+            device=device,
+        )
 
         # Print progress
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch + 1}/{args.epochs}, Loss: {avg_loss:.6f}")
+            print(
+                f"Epoch {epoch + 1}/{args.epochs}, "
+                f"Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}"
+            )
 
         # Save periodic checkpoints
         if (epoch + 1) % args.save_every == 0:
@@ -246,8 +307,8 @@ def main():
             print(f"Checkpoint saved to {checkpoint_path}")
 
         # Save best model
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        if val_loss < best_loss:
+            best_loss = val_loss
             best_path = output_dir / "best.pt"
             torch.save(model.state_dict(), best_path)
 
