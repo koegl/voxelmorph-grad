@@ -3,15 +3,17 @@ Core VoxelMorph models for unsupervised and supervised learning.
 """
 
 # Core library imports
-from typing import List, Literal, Sequence, Union, Callable, Tuple, Dict
+from typing import Callable, Dict, List, Literal, Sequence, Tuple, Union
+
+import neurite as ne
 
 # Third-party imports
 import torch
 import torch.nn as nn
-import neurite as ne
 
 # Local imports
 import voxelmorph as vxm
+from voxelmorph.nn.my_models import BasicUNet
 
 
 class VxmPairwise(nn.Module):
@@ -104,7 +106,7 @@ class VxmPairwise(nn.Module):
 
         self._init_flow_layer(ndim, ndim, flow_initializer)
         unet_kwargs = unet_kwargs or {}
-        self.model = ne.nn.models.BasicUNet(
+        self.model = BasicUNet(
             ndim=ndim,
             in_channels=(source_channels + target_channels),
             out_channels=ndim,
@@ -129,7 +131,7 @@ class VxmPairwise(nn.Module):
         target: torch.Tensor,
         return_warped_source: bool = False,
         return_warped_target: bool = False,
-        return_field_type: Literal['displacement', 'velocity', 'svf'] = 'displacement',
+        return_field_type: Literal["displacement", "velocity", "svf"] = "displacement",
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Forward pass of `VxmPairwise`.
@@ -185,7 +187,7 @@ class VxmPairwise(nn.Module):
         ValueError
             If `return_field_type` is not one of {'velocity', 'svf', 'displacement'}.
         """
-        valid_field_types = {'velocity', 'svf', 'displacement'}
+        valid_field_types = {"velocity", "svf", "displacement"}
         if return_field_type not in valid_field_types:
             raise ValueError(
                 f"return_field_type must be one of {valid_field_types}, got '{return_field_type}'"
@@ -193,36 +195,39 @@ class VxmPairwise(nn.Module):
 
         if self.integration_steps == 0:
             if return_warped_target:
-                raise ValueError("Cannot return warped target image when integration_steps=0.")
+                raise ValueError(
+                    "Cannot return warped target image when integration_steps=0."
+                )
 
         # Pass combined features through the model's backbone & flow layer
         combined_features = torch.cat([source, target], dim=1)
         combined_features = self.model(combined_features)
-        velocity = self.flow_layer(combined_features)   # Positive velocity: (source -> target)
+        velocity = self.flow_layer(
+            combined_features
+        )  # Positive velocity: (source -> target)
 
         if self.integration_steps > 0:
             self.velocity = velocity
 
         # Early return if no warped images requested and returning velocity
         if not return_warped_source and not return_warped_target:
-            if return_field_type in {'velocity', 'svf'}:
+            if return_field_type in {"velocity", "svf"}:
                 return velocity
 
         pos_displacement = velocity
         neg_displacement = None
 
-        if return_warped_source or return_field_type == 'displacement':
+        if return_warped_source or return_field_type == "displacement":
             if self.integration_steps > 0:
                 # Only need positive displacement
                 pos_displacement = self.velocity_field_integrator(velocity)
 
         if self.integration_steps > 0:
-
             if return_warped_target:
                 # Only need negative displacement
                 neg_displacement = self.velocity_field_integrator(-velocity)
 
-        if return_field_type == 'displacement':
+        if return_field_type == "displacement":
             return_field = pos_displacement
         else:
             return_field = velocity
@@ -241,10 +246,7 @@ class VxmPairwise(nn.Module):
         return tuple(outputs) if len(outputs) > 1 else outputs[0]
 
     def _init_flow_layer(
-        self,
-        ndim: int,
-        features: int,
-        flow_initializer: float = 1e-5
+        self, ndim: int, features: int, flow_initializer: float = 1e-5
     ):
         """
         Initialize the flow layer with custom weight initialization.
@@ -272,7 +274,9 @@ class VxmPairwise(nn.Module):
         if flow_initializer is not None:
             # Initialize weights from Normal(mean=0, std=flow_initializer)
             with torch.no_grad():
-                torch.nn.init.normal_(flow_layer.conv0.weight, mean=0.0, std=flow_initializer)
+                torch.nn.init.normal_(
+                    flow_layer.conv0.weight, mean=0.0, std=flow_initializer
+                )
                 # Set the bias term(s) to zero for the first (and only) conv
                 if flow_layer.conv0.bias is not None:
                     flow_layer.conv0.bias.zero_()

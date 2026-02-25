@@ -33,20 +33,24 @@ License.
 
 # Core library imports
 import argparse
-from typing import Sequence
 from pathlib import Path
+from typing import Sequence
+
+import neurite as ne
+import nibabel as nib
 
 # Third-party imports
 import numpy as np
-import nibabel as nib
 import torch
 from torch import nn
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
-import neurite as ne
 
 # Local imports
 import voxelmorph as vxm
+
+# todo: add validation loop
+# todo: add MLFlow logging
 
 
 class VxmIterableDataset(IterableDataset):
@@ -54,16 +58,15 @@ class VxmIterableDataset(IterableDataset):
     PyTorch IterableDataset for infinite VoxelMorph registration data.
     """
 
-    def __init__(self, device: str = 'cpu') -> None:
+    def __init__(self, device: str = "cpu") -> None:
         """
         Parameters
         ----------
         device : str
             Device to place tensors on.
         """
-        self.teramedical_root = Path('/autofs/cluster/dalcalab1/data/teramedical/processed')
         self.device = device
-        self.oasis_path = self.teramedical_root / 'OASIS/neurite/proc-v1.0'
+        self.oasis_path = Path("/home/iml/fryderyk.koegl/data/neurite-oasis")
         self._get_vol_paths()
 
     def __iter__(self):
@@ -83,13 +86,13 @@ class VxmIterableDataset(IterableDataset):
             target_path = self.folder_abspaths[idx2]
 
             # Get niftis
-            source_nii = nib.load(f'{source_path}/vol_norm_aligned.nii.gz')
-            target_nii = nib.load(f'{target_path}/vol_norm_aligned.nii.gz')
+            source_nii = nib.load(f"{source_path}/aligned_norm.nii.gz")
+            target_nii = nib.load(f"{target_path}/aligned_norm.nii.gz")
 
             source = torch.from_numpy(source_nii.get_fdata()).float().unsqueeze(0)
             target = torch.from_numpy(target_nii.get_fdata()).float().unsqueeze(0)
 
-            yield {'source': source, 'target': target}
+            yield {"source": source, "target": target}
 
     def _get_vol_paths(self) -> None:
         """
@@ -97,8 +100,8 @@ class VxmIterableDataset(IterableDataset):
         """
         self.folder_abspaths = []
 
-        for i in range(1, 450):
-            folder = self.oasis_path / f'OASIS_OAS1_{i:04}_MR1'
+        for i in range(1, 4):
+            folder = self.oasis_path / f"OASIS_OAS1_{i:04}_MR1"
 
             if folder.exists():
                 self.folder_abspaths.append(folder)
@@ -112,7 +115,7 @@ def train_epoch(
     grad_loss_fn: nn.Module,
     loss_weights: Sequence[float],
     steps_per_epoch: int,
-    device: str = 'cuda'
+    device: str = "cuda",
 ) -> float:
     """
     Train for one epoch.
@@ -142,15 +145,12 @@ def train_epoch(
         optimizer.zero_grad()
 
         # Move to device in training loop (not dataloader/dataset!)
-        source = batch['source'].to(device)
-        target = batch['target'].to(device)
+        source = batch["source"].to(device)
+        target = batch["target"].to(device)
 
         # Get the displacement and the warped source image from the model
         displacement, warped_source = model(
-            source,
-            target,
-            return_warped_source=True,
-            return_field_type='displacement'
+            source, target, return_warped_source=True, return_field_type="displacement"
         )
 
         img_loss = image_loss_fn(target, warped_source)
@@ -165,21 +165,30 @@ def train_epoch(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train 3D VoxelMorph on OASIS data')
-    parser.add_argument('--output-dir', type=str, default='output', help='Output directory')
-    parser.add_argument('--epochs', type=int, default=100_000, help='Number of epochs')
-    parser.add_argument('--workers', type=int, default=0, help='Number of workers')
-    parser.add_argument('--steps-per-epoch', type=int, default=100, help='Steps per epoch')
-    parser.add_argument('--batch-size', type=int, default=4, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--lambda', type=float, dest='lambda_param', default=0.01)
-    parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
-    parser.add_argument('--save-every', type=int, default=10, help='Checkpoint every N epochs')
+    parser = argparse.ArgumentParser(description="Train 3D VoxelMorph on OASIS data")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="/home/iml/fryderyk.koegl/outputs/vxm_grad",
+        help="Output directory",
+    )
+    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
+    parser.add_argument("--workers", type=int, default=0, help="Number of workers")
+    parser.add_argument(
+        "--steps-per-epoch", type=int, default=2, help="Steps per epoch"
+    )
+    parser.add_argument("--batch-size", type=int, default=1, help="Batch size")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--lambda", type=float, dest="lambda_param", default=0.01)
+    parser.add_argument("--gpu", type=str, default="0", help="GPU ID")
+    parser.add_argument(
+        "--save-every", type=int, default=10, help="Checkpoint every N epochs"
+    )
     args = parser.parse_args()
 
     # Set device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f'Using device: {device}')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
 
     # Create model
     model = vxm.nn.models.VxmPairwise(
@@ -192,7 +201,7 @@ def main():
 
     # Setup losses and optimizer
     image_loss_fn = ne.nn.modules.MSE()
-    grad_loss_fn = ne.nn.modules.SpatialGradient('l2')
+    grad_loss_fn = ne.nn.modules.SpatialGradient("l2")
     loss_weights = [1.0, args.lambda_param]
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -211,10 +220,9 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Training loop
-    print(f'Training for {args.epochs} epochs...')
-    best_loss = float('inf')
-    for epoch in tqdm(range(args.epochs), desc='Epochs'):
-
+    print(f"Training for {args.epochs} epochs...")
+    best_loss = float("inf")
+    for epoch in tqdm(range(args.epochs), desc="Epochs"):
         # Train for one epoch
         avg_loss = train_epoch(
             model=model,
@@ -224,31 +232,30 @@ def main():
             grad_loss_fn=grad_loss_fn,
             loss_weights=loss_weights,
             steps_per_epoch=args.steps_per_epoch,
-            device=device
+            device=device,
         )
 
         # Print progress
         if (epoch + 1) % 10 == 0:
-            print(f'Epoch {epoch + 1}/{args.epochs}, Loss: {avg_loss:.6f}')
+            print(f"Epoch {epoch + 1}/{args.epochs}, Loss: {avg_loss:.6f}")
 
         # Save periodic checkpoints
         if (epoch + 1) % args.save_every == 0:
-
-            checkpoint_path = output_dir / f'checkpoint_epoch{epoch + 1}.pt'
+            checkpoint_path = output_dir / f"checkpoint_epoch{epoch + 1}.pt"
             torch.save(model.state_dict(), checkpoint_path)
-            print(f'Checkpoint saved to {checkpoint_path}')
+            print(f"Checkpoint saved to {checkpoint_path}")
 
         # Save best model
         if avg_loss < best_loss:
             best_loss = avg_loss
-            best_path = output_dir / 'best.pt'
+            best_path = output_dir / "best.pt"
             torch.save(model.state_dict(), best_path)
 
     # Save final model
-    final_path = output_dir / 'final.pt'
+    final_path = output_dir / "final.pt"
     torch.save(model.state_dict(), final_path)
-    print(f'Final model saved to {final_path}')
+    print(f"Final model saved to {final_path}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
