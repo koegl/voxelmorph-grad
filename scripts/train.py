@@ -36,6 +36,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
+import mlflow
 import neurite as ne
 import nibabel as nib
 
@@ -225,6 +226,10 @@ def main():
     )
     args = parser.parse_args()
 
+    # MLflow setup
+    mlflow.set_tracking_uri("http://127.0.0.1:5002")
+    mlflow.set_experiment("VoxelMorph_grad")
+
     # Set device
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -268,54 +273,79 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Training loop
-    print(f"Training for {args.epochs} epochs...")
-    best_loss = float("inf")
-    for epoch in tqdm(range(args.epochs), desc="Epochs"):
-        # Train for one epoch
-        train_loss = train_epoch(
-            model=model,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            image_loss_fn=image_loss_fn,
-            grad_loss_fn=grad_loss_fn,
-            loss_weights=loss_weights,
-            steps_per_epoch=args.steps_per_epoch,
-            device=device,
-        )
-        val_loss = validate_epoch(
-            model=model,
-            dataloader=val_loader,
-            image_loss_fn=image_loss_fn,
-            grad_loss_fn=grad_loss_fn,
-            loss_weights=loss_weights,
-            steps_per_epoch=args.val_steps,
-            device=device,
+    with mlflow.start_run():
+        mlflow.log_params(
+            {
+                "epochs": args.epochs,
+                "workers": args.workers,
+                "steps_per_epoch": args.steps_per_epoch,
+                "val_steps": args.val_steps,
+                "batch_size": args.batch_size,
+                "lr": args.lr,
+                "lambda": args.lambda_param,
+                "save_every": args.save_every,
+                "device": device,
+                "train_indices": str(train_indices),
+                "val_indices": str(val_indices),
+                "nb_features": str([16, 16, 16, 16, 16]),
+                "integration_steps": 0,
+            }
         )
 
-        # Print progress
-        if (epoch + 1) % 10 == 0:
-            print(
-                f"Epoch {epoch + 1}/{args.epochs}, "
-                f"Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}"
+        # Training loop
+        print(f"Training for {args.epochs} epochs...")
+        best_loss = float("inf")
+        for epoch in tqdm(range(args.epochs), desc="Epochs"):
+            # Train for one epoch
+            train_loss = train_epoch(
+                model=model,
+                dataloader=train_loader,
+                optimizer=optimizer,
+                image_loss_fn=image_loss_fn,
+                grad_loss_fn=grad_loss_fn,
+                loss_weights=loss_weights,
+                steps_per_epoch=args.steps_per_epoch,
+                device=device,
+            )
+            val_loss = validate_epoch(
+                model=model,
+                dataloader=val_loader,
+                image_loss_fn=image_loss_fn,
+                grad_loss_fn=grad_loss_fn,
+                loss_weights=loss_weights,
+                steps_per_epoch=args.val_steps,
+                device=device,
             )
 
-        # Save periodic checkpoints
-        if (epoch + 1) % args.save_every == 0:
-            checkpoint_path = output_dir / f"checkpoint_epoch{epoch + 1}.pt"
-            torch.save(model.state_dict(), checkpoint_path)
-            print(f"Checkpoint saved to {checkpoint_path}")
+            mlflow.log_metric("train_loss", train_loss, step=epoch + 1)
+            mlflow.log_metric("val_loss", val_loss, step=epoch + 1)
 
-        # Save best model
-        if val_loss < best_loss:
-            best_loss = val_loss
-            best_path = output_dir / "best.pt"
-            torch.save(model.state_dict(), best_path)
+            # Print progress
+            if (epoch + 1) % 10 == 0:
+                print(
+                    f"Epoch {epoch + 1}/{args.epochs}, "
+                    f"Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}"
+                )
 
-    # Save final model
-    final_path = output_dir / "final.pt"
-    torch.save(model.state_dict(), final_path)
-    print(f"Final model saved to {final_path}")
+            # Save periodic checkpoints
+            if (epoch + 1) % args.save_every == 0:
+                checkpoint_path = output_dir / f"checkpoint_epoch{epoch + 1}.pt"
+                torch.save(model.state_dict(), checkpoint_path)
+                mlflow.log_artifact(str(checkpoint_path))
+                print(f"Checkpoint saved to {checkpoint_path}")
+
+            # Save best model
+            if val_loss < best_loss:
+                best_loss = val_loss
+                best_path = output_dir / "best.pt"
+                torch.save(model.state_dict(), best_path)
+                mlflow.log_artifact(str(best_path))
+
+        # Save final model
+        final_path = output_dir / "final.pt"
+        torch.save(model.state_dict(), final_path)
+        mlflow.log_artifact(str(final_path))
+        print(f"Final model saved to {final_path}")
 
 
 if __name__ == "__main__":
